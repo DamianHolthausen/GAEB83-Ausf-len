@@ -46,6 +46,7 @@ rollback() {
 }
 
 [ "${1:-}" = "--rollback" ] && rollback
+# Uzycie bez klawiatury: dwuklik na pliku w menedzerze plikow -> "Execute in Terminal".
 
 say "Kontrola systemu"
 MODEL=$(tr -d '\0' < /proc/device-tree/model || true)
@@ -102,9 +103,20 @@ EOF
 [ -f /usr/share/X11/xorg.conf.d/10-evdev.conf ] && sudo cp /usr/share/X11/xorg.conf.d/10-evdev.conf "$EVDEV_45"
 sudo cp "$HOME/LCD-show/usr/99-calibration.conf-mhs35-90" "$XORG_CALIB"
 
+say "Wlaczenie SSH (zeby kolejne kroki wykonywac z laptopa)"
+sudo raspi-config nonint do_ssh 0 || true
+echo "Uzytkownik: $(whoami)   Adres IP: $(hostname -I 2>/dev/null)"
+echo "Z laptopa (PowerShell):  ssh $(whoami)@$(hostname -I 2>/dev/null | awk '{print $1}')"
+
 say "Gotowe. Po restarcie pulpit pojawi sie na ekranie 3,5\", HDMI pokaze tylko konsole."
 echo "Sprawdzenie po restarcie:  ls /dev/fb*   oraz   dmesg | grep -i -E 'ili9486|ads7846'"
 echo "Wycofanie:  bash pi5-mhs35-setup.sh --rollback"
 echo
-read -r -p "Uruchomic ponownie teraz? [t/N] " ans </dev/tty || ans=n
-case "$ans" in t|T|y|Y) sudo reboot ;; *) echo "Uruchom ponownie recznie: sudo reboot" ;; esac
+if [ "${1:-}" = "--no-reboot" ]; then
+  echo "Pominieto restart (--no-reboot). Uruchom ponownie recznie: sudo reboot"
+  exit 0
+fi
+for i in 20 15 10 5 3 2 1; do
+  printf '\rAutomatyczny restart za %2d s (Ctrl+C przerywa)...' "$i"; sleep 1
+done
+echo; sudo reboot
