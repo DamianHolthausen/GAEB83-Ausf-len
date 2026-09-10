@@ -1,12 +1,15 @@
 #!/bin/bash
-# Lustrzane odbicie pulpitu HDMI na wyswietlaczu MHS 3.5" SPI (/dev/fb1)
-# na Raspberry Pi 5.
+# Lustrzane odbicie pulpitu HDMI na wyswietlaczu MHS 3.5" SPI na Raspberry Pi 5.
+#
+# Urzadzenie framebuffer jest wyszukiwane po nazwie sterownika (fb_ili9486),
+# bo numer fbN zmienia sie miedzy restartami zaleznie od kolejnosci, w jakiej
+# zglaszaja sie sterowniki. Raz bywa to fb0, raz fb1.
 #
 # Dlaczego tak: dawne narzedzie fbcp opiera sie na interfejsie DispmanX,
 # ktorego Raspberry Pi 5 juz nie ma. Serwer X renderuje przez DRM/KMS, wiec
-# w /dev/fb0 nie ma obrazu pulpitu. Rozwiazanie: ffmpeg przechwytuje zawartosc
-# ekranu :0 (x11grab), skaluje ja do rozdzielczosci wyswietlacza i zapisuje
-# bezposrednio do /dev/fb1 (urzadzenie wyjsciowe fbdev).
+# w emulowanym framebufferze nie ma obrazu pulpitu. Rozwiazanie: ffmpeg
+# przechwytuje zawartosc ekranu :0 (x11grab), skaluje ja do rozdzielczosci
+# wyswietlacza i zapisuje wprost do urzadzenia (wyjscie fbdev).
 #
 # Uzycie (przez SSH):
 #   bash pi5-tft-mirror.sh                 # test na zywo, Ctrl+C konczy
@@ -42,7 +45,7 @@ done
 
 stop_all() {
   sudo systemctl stop tft-mirror.service 2>/dev/null
-  sudo pkill -f "f fbdev /dev/fb1" 2>/dev/null
+  sudo pkill -f "fbdev /dev/fb" 2>/dev/null
   sudo pkill -f "x11grab" 2>/dev/null
   # zatrzymaj tez poprzednie rozwiazanie z osobnym serwerem X
   sudo systemctl disable --now tft-screen.service 2>/dev/null
@@ -66,11 +69,35 @@ esac
 
 # ------------------------------------------------------------- warunki
 say "Kontrola warunkow"
-[ -e /dev/fb1 ] || { err "Brak /dev/fb1"; exit 1; }
-FB_BPP=$(cat /sys/class/graphics/fb1/bits_per_pixel)
-FB_W=$(cut -d, -f1 /sys/class/graphics/fb1/virtual_size)
-FB_H=$(cut -d, -f2 /sys/class/graphics/fb1/virtual_size)
-echo "Wyswietlacz: ${FB_W}x${FB_H}, ${FB_BPP} bpp"
+
+# Wyswietlacz SPI szukany po nazwie sterownika, bo numer fbN zmienia sie
+# miedzy restartami zaleznie od kolejnosci zglaszania sie sterownikow.
+FBSYS=""
+for d in /sys/class/graphics/fb[0-9]*; do
+  [ -d "$d" ] || continue
+  n=$(cat "$d/name" 2>/dev/null)
+  case "$n" in *ili9486*|*mhs*|*tft*) FBSYS="$d"; break ;; esac
+done
+if [ -z "$FBSYS" ]; then
+  for d in /sys/class/graphics/fb[0-9]*; do
+    [ -d "$d" ] || continue
+    [ "$(cat "$d/virtual_size" 2>/dev/null)" = "480,320" ] && FBSYS="$d" && break
+  done
+fi
+if [ -z "$FBSYS" ]; then
+  err "Nie znalazlem wyswietlacza SPI wsrod urzadzen framebuffer"
+  echo "Dostepne:"
+  for d in /sys/class/graphics/fb[0-9]*; do
+    [ -d "$d" ] && echo "  $(basename "$d"): $(cat "$d/name" 2>/dev/null) $(cat "$d/virtual_size" 2>/dev/null)"
+  done
+  exit 1
+fi
+
+FBDEV="/dev/$(basename "$FBSYS")"
+FB_BPP=$(cat "$FBSYS/bits_per_pixel")
+FB_W=$(cut -d, -f1 "$FBSYS/virtual_size")
+FB_H=$(cut -d, -f2 "$FBSYS/virtual_size")
+echo "Wyswietlacz: $FBDEV ($(cat "$FBSYS/name")), ${FB_W}x${FB_H}, ${FB_BPP} bpp"
 
 case "$FB_BPP" in
   16) PIXFMT="rgb565le" ;;
@@ -93,9 +120,33 @@ ffmpeg -hide_banner -devices 2>/dev/null | grep -q " fbdev" \
 say "Zapisuje $RUNNER"
 sudo tee "$RUNNER" >/dev/null <<EOF
 #!/bin/bash
-# Odbija pulpit z ekranu :0 na /dev/fb1.
+# Odbija pulpit z ekranu :0 na wyswietlacz SPI.
 FPS=${FPS}
 FILL=${FILL}
+
+# Numer fbN bywa inny po kazdym restarcie, wiec szukamy po nazwie sterownika.
+FBSYS=""
+for d in /sys/class/graphics/fb[0-9]*; do
+    [ -d "\$d" ] || continue
+    case "\$(cat "\$d/name" 2>/dev/null)" in *ili9486*|*mhs*|*tft*) FBSYS="\$d"; break ;; esac
+done
+if [ -z "\$FBSYS" ]; then
+    for d in /sys/class/graphics/fb[0-9]*; do
+        [ -d "\$d" ] || continue
+        [ "\$(cat "\$d/virtual_size" 2>/dev/null)" = "480,320" ] && FBSYS="\$d" && break
+    done
+fi
+[ -z "\$FBSYS" ] && { echo "Nie znaleziono wyswietlacza SPI" >&2; exit 1; }
+
+FBDEV="/dev/\$(basename "\$FBSYS")"
+FB_W=\$(cut -d, -f1 "\$FBSYS/virtual_size")
+FB_H=\$(cut -d, -f2 "\$FBSYS/virtual_size")
+case "\$(cat "\$FBSYS/bits_per_pixel")" in
+    16) PIXFMT=rgb565le ;;
+    32) PIXFMT=bgra ;;
+    24) PIXFMT=bgr24 ;;
+    *)  echo "Nieobslugiwana glebia" >&2; exit 1 ;;
+esac
 
 # plik autoryzacji serwera X uruchomionego przez menedzera logowania
 for a in /var/run/lightdm/root/:0 /run/lightdm/root/:0 /home/*/.Xauthority; do
@@ -113,19 +164,16 @@ SRC=\$(xrandr --current 2>/dev/null | awk '/\\*/{print \$1; exit}')
 [ -z "\$SRC" ] && SRC=\$(xdpyinfo 2>/dev/null | awk '/dimensions:/{print \$2; exit}')
 [ -z "\$SRC" ] && SRC=1920x1080
 
-FB_W=\$(cut -d, -f1 /sys/class/graphics/fb1/virtual_size)
-FB_H=\$(cut -d, -f2 /sys/class/graphics/fb1/virtual_size)
-
 if [ "\$FILL" = "1" ]; then
     VF="scale=\${FB_W}:\${FB_H}"
 else
     VF="scale=\${FB_W}:\${FB_H}:force_original_aspect_ratio=decrease,pad=\${FB_W}:\${FB_H}:(ow-iw)/2:(oh-ih)/2:black"
 fi
 
-echo "Zrodlo: \$SRC -> \${FB_W}x\${FB_H}, \${FPS} kl/s, format ${PIXFMT}"
+echo "Zrodlo: \$SRC -> \$FBDEV \${FB_W}x\${FB_H}, \${FPS} kl/s, format \$PIXFMT"
 exec ffmpeg -hide_banner -loglevel warning \\
     -f x11grab -draw_mouse 1 -framerate "\$FPS" -video_size "\$SRC" -i :0 \\
-    -vf "\$VF" -pix_fmt ${PIXFMT} -f fbdev /dev/fb1
+    -vf "\$VF" -pix_fmt \$PIXFMT -f fbdev "\$FBDEV"
 EOF
 sudo chmod 755 "$RUNNER"
 
