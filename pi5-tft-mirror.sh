@@ -215,7 +215,7 @@ STRIDE=$(cat "$FBSYS/stride" 2>/dev/null)
 
 echo "Cel: $FBDEV ${FB_W}x${FB_H}, ${FPS} kl/s, format $PIXFMT, stride $STRIDE"
 set -o pipefail
-ffmpeg -hide_banner -loglevel warning -nostdin \
+ffmpeg -hide_banner -loglevel error -nostdin \
     -f x11grab -draw_mouse 1 -framerate "$FPS" -i :0 \
     -vf "$VF" -pix_fmt "$PIXFMT" -f rawvideo pipe:1 \
   | /usr/local/sbin/fbwrite.py "$FBDEV" "$FB_W" "$FB_H" "$BYTES" "$STRIDE"
